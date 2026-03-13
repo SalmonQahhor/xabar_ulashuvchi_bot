@@ -60,33 +60,36 @@ async def start_login(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(LoginSteps.phone)
     await call.answer()
 
+
+
 @dp.message(LoginSteps.phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    if message.contact:
-        phone = message.contact.phone_number
-        if not phone.startswith('+'): phone = f"+{phone}"
-    else:
-        phone = message.text.strip()
-    
+    phone = message.contact.phone_number if message.contact else message.text.strip()
+    if not phone.startswith('+'): phone = f"+{phone}"
     await state.update_data(phone=phone)
     
-    # Telethon client yaratish
-    client = TelegramClient(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH)
-    await client.connect()
+    # Clientni sozlashda device va system ma'lumotlarini qo'shamiz (blokdan qochish uchun)
+    client = TelegramClient(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH, 
+                            device_model="XabarBot v2", system_version="Linux")
     
+    await client.connect()
     try:
-        # Telethonda kod yuborish so'rovi
+        logging.info(f"Kod so'ralmoqda: {phone}")
         result = await client.send_code_request(phone)
         await state.update_data(phone_code_hash=result.phone_code_hash)
         
-        await message.answer("📩 Kod Telegram ilovangizga yuborildi. Uni kiriting:", reply_markup=ReplyKeyboardRemove())
+        await message.answer("📩 Kod Telegram ilovangizga yuborildi. Iltimos, kodni kiriting:")
         await state.set_state(LoginSteps.code)
+        logging.info("Kod so'rovi muvaffaqiyatli o'tdi.")
     except Exception as e:
-        logging.error(f"TELETHON ERROR: {e}")
-        await message.answer(f"❌ Xatolik: {str(e)}", reply_markup=ReplyKeyboardRemove())
+        logging.error(f"TELETHON XATOSI: {e}")
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
         await state.clear()
     finally:
         await client.disconnect()
+
+
+
 
 @dp.message(LoginSteps.code)
 async def process_code(message: types.Message, state: FSMContext):
