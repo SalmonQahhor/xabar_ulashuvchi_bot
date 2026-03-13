@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+aiogram
+apscheduler
+mysql-connector-python
+python-dotenv
