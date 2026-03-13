@@ -1,4 +1,4 @@
-pyrogram
+telethon
 tgcrypto
 aiogram
 apscheduler
