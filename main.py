@@ -6,8 +6,12 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pyrogram import Client, enums
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+
+from telethon import TelegramClient, functions, types as tele_types
+from telethon.sessions import StringSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from database import DB
 import config
 from users import ALLOWED_USERS
@@ -15,7 +19,7 @@ from users import ALLOWED_USERS
 # Loglarni sozlash
 logging.basicConfig(level=logging.INFO)
 
-# Sessions papkasini yaratish (Xato bermasligi uchun)
+# Sessions papkasini yaratish
 if not os.path.exists("sessions"):
     os.makedirs("sessions")
 
@@ -23,7 +27,6 @@ bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 db = DB()
 scheduler = AsyncIOScheduler()
-active_userbots = {}
 
 class LoginSteps(StatesGroup):
     phone = State()
@@ -44,58 +47,61 @@ async def start_cmd(message: types.Message):
     kb.adjust(2)
     await message.answer("Boshqaruv paneli:", reply_markup=kb.as_markup())
 
-# --- LOGIN JARAYONI (AKKAUNT ULASH) ---
+# --- LOGIN JARAYONI ---
 @dp.callback_query(F.data == "connect")
 async def start_login(call: types.CallbackQuery, state: FSMContext):
-    await call.message.answer("📞 Telefon raqamingizni yuboring (masalan: +998901234567):")
+    # Raqam yuborish tugmasi
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Raqamni yuborish", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    await call.message.answer("Pastdagi tugmani bosing yoki raqamni yuboring:", reply_markup=kb)
     await state.set_state(LoginSteps.phone)
     await call.answer()
 
-
-
 @dp.message(LoginSteps.phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.text.strip()
+    if message.contact:
+        phone = message.contact.phone_number
+        if not phone.startswith('+'): phone = f"+{phone}"
+    else:
+        phone = message.text.strip()
+    
     await state.update_data(phone=phone)
     
-    client = Client(
-        name=f"sessions/{message.from_user.id}",
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
-        device_model="XabarBot Server",
-        system_version="Linux",
-        app_version="1.0"
-    )
-    
+    # Telethon client yaratish
+    client = TelegramClient(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH)
     await client.connect()
+    
     try:
-        # force_sms=True qilib ko'ring yoki shunchaki yuboring
-        code_info = await client.send_code(phone)
-        await state.update_data(hash=code_info.phone_code_hash)
-        await message.answer("📩 Kod Telegram ilovangizga yuborildi. Agar ilovaga kelmasa, 2 daqiqa kuting.")
+        # Telethonda kod yuborish so'rovi
+        result = await client.send_code_request(phone)
+        await state.update_data(phone_code_hash=result.phone_code_hash)
+        
+        await message.answer("📩 Kod Telegram ilovangizga yuborildi. Uni kiriting:", reply_markup=ReplyKeyboardRemove())
         await state.set_state(LoginSteps.code)
     except Exception as e:
-        # AGAR BU YERDA XATO CHIQSA, LOGDA KO'RINADI
-        logging.error(f"PYROGRAM XATOSI: {e}")
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
+        logging.error(f"TELETHON ERROR: {e}")
+        await message.answer(f"❌ Xatolik: {str(e)}", reply_markup=ReplyKeyboardRemove())
         await state.clear()
     finally:
         await client.disconnect()
-
-
 
 @dp.message(LoginSteps.code)
 async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
     code = message.text.strip()
-    client = Client(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH)
+    
+    client = TelegramClient(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH)
     await client.connect()
+    
     try:
-        await client.sign_in(data['phone'], data['hash'], code)
-        db.add_allowed_user(message.from_user.id) # Bazaga qo'shish
+        await client.sign_in(data['phone'], code, phone_code_hash=data['phone_code_hash'])
+        db.add_allowed_user(message.from_user.id)
         await message.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
     except Exception as e:
-        await message.answer(f"❌ Xato: {e}")
+        await message.answer(f"❌ Xato: {str(e)}")
     finally:
         await client.disconnect()
         await state.clear()
@@ -104,20 +110,25 @@ async def process_code(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "refresh_groups")
 async def refresh_groups(call: types.CallbackQuery):
     user_id = call.from_user.id
-    client = Client(f"sessions/{user_id}", config.API_ID, config.API_HASH)
+    client = TelegramClient(f"sessions/{user_id}", config.API_ID, config.API_HASH)
     await client.connect()
     
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        return await call.answer("Avval akkauntni ulang!", show_alert=True)
+
     groups = []
-    async for dialog in client.get_dialogs():
-        if dialog.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-            groups.append((dialog.chat.id, dialog.chat.title))
+    async for dialog in client.iter_dialogs():
+        if dialog.is_group or dialog.is_channel:
+            # Telethonda dialog.is_channel ham guruhlarni (supergroup) o'z ichiga oladi
+            groups.append((dialog.id, dialog.name))
     
     db.sync_groups(user_id, groups)
     await client.disconnect()
     await call.message.answer(f"✅ {len(groups)} ta guruh bazaga qo'shildi!")
     await call.answer()
 
-# --- INTERVAL VA BOSHQALAR ---
+# --- INTERVAL VA SOZLAMALAR ---
 @dp.callback_query(F.data == "time_menu")
 async def time_menu(call: types.CallbackQuery):
     kb = InlineKeyboardBuilder()
@@ -132,16 +143,13 @@ async def set_time(call: types.CallbackQuery):
     db.update_user(call.from_user.id, interval_min=t)
     await call.answer(f"Sozlandi: {t} min", show_alert=True)
 
-# --- REKLAMA XABARINI TUTISH ---
 @dp.message(F.text | F.photo | F.video)
 async def catch_msg(message: types.Message):
-    # Agar foydalanuvchi login qilgan bo'lsa xabarni saqlash
     db.update_user(message.from_user.id, message_id=message.message_id, from_chat_id=message.chat.id)
     await message.answer("✅ Reklama xabari saqlandi!")
 
 async def check_and_run_tasks():
     logging.info("Tekshirilmoqda...")
-    # Bu yerda yuborish logikasi bo'ladi
 
 async def main():
     scheduler.add_job(check_and_run_tasks, "interval", minutes=1)
