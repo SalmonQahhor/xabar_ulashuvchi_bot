@@ -56,27 +56,29 @@ async def start_login(call: types.CallbackQuery, state: FSMContext):
 @dp.message(LoginSteps.phone)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.text.strip()
+    if not phone.startswith('+'):
+        return await message.answer("❌ Raqamni +998901234567 formatida yuboring!")
+
     await state.update_data(phone=phone)
     
-    # Yangi va barqaror ulanish usuli
     client = Client(
         name=f"sessions/{message.from_user.id}",
         api_id=config.API_ID,
         api_hash=config.API_HASH,
-        device_model="XabarBot Server",
-        system_version="Linux"
+        device_model="XabarBot Server"
     )
     
     await client.connect()
     try:
-        # Kod yuborish
+        # Kod yuborishni sinash
         code_info = await client.send_code(phone)
         await state.update_data(hash=code_info.phone_code_hash)
-        await message.answer("📩 Telegram ilovangizga (SMS emas!) kelgan 5 xonali kodni kiriting:")
+        await message.answer("📩 Kod Telegram ilovangizga yuborildi. Uni shu yerga yozing:")
         await state.set_state(LoginSteps.code)
     except Exception as e:
-        logging.error(f"KOD YUBORISHDA XATO: {e}")
-        await message.answer(f"❌ Kod yuborilmadi. Sababi: {e}")
+        # Xatoni logga yozish va foydalanuvchiga aytish
+        logging.error(f"Telegram Error: {e}")
+        await message.answer(f"❌ Telegram kod yubormadi.\nSababi: {str(e)}")
         await state.clear()
     finally:
         await client.disconnect()
