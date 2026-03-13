@@ -107,6 +107,27 @@ async def startup_setup():
     scheduler.add_job(check_and_run_tasks, "interval", minutes=1)
     scheduler.start()
 
+
+
+# UserBot orqali guruhlar ro'yxatini yangilash
+@dp.callback_query(F.data == "refresh_groups")
+async def refresh_groups(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    client = active_userbots.get(user_id)
+    
+    if not client:
+        return await call.answer("Avval akkauntni ulang!", show_alert=True)
+    
+    groups = []
+    async for dialog in client.get_dialogs():
+        if dialog.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+            groups.append((dialog.chat.id, dialog.chat.title))
+    
+    db.sync_groups(user_id, groups)
+    await call.message.answer(f"✅ {len(groups)} ta guruh topildi va bazaga qo'shildi!")
+
+
+
 async def check_and_run_tasks():
     # Bazadan barcha faol foydalanuvchilarni tekshirish logikasi
     pass
