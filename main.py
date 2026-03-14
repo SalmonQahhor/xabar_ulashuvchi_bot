@@ -27,18 +27,22 @@ bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 db = DB()
 
-# --- 1. START: FAQAT BITTA TUGMA ---
-# F.state("*") qo'shildi - har qanday holatda start ishlaydi
-@dp.message(Command("start"), F.state("*"))
+# --- 1. START
+@dp.message(Command("start"))  # F.state("*") olib tashlandi, Command ustuvor
 async def start_cmd(message: types.Message, state: FSMContext):
-    await state.clear() # Eski holatlarni tozalaymiz
+    logging.info(f"Start buyrug'i keldi: {message.from_user.id}")
+    await state.clear() # Muhim: Eski holatlarni tozalaydi
+    
     kb = ReplyKeyboardBuilder()
     kb.button(text="📱 Akkauntni ulash", request_contact=True)
+    
     await message.answer(
         "Xush kelibsiz! Botdan foydalanish uchun avval akkauntni ulashingiz kerak.",
         reply_markup=kb.as_markup(resize_keyboard=True)
     )
     await state.set_state(BotStates.auth_phone)
+
+
 
 # --- 2. RAQAM YUBORILGANDAN SO'NG ---
 @dp.message(BotStates.auth_phone, F.contact | F.text)
@@ -64,6 +68,8 @@ async def process_phone(message: types.Message, state: FSMContext):
     finally:
         await client.disconnect()
 
+
+
 # --- 3. KOD KIRITILSA VA ASOSIY MENYU ---
 @dp.message(BotStates.auth_code)
 async def process_code(message: types.Message, state: FSMContext):
@@ -84,6 +90,7 @@ async def process_code(message: types.Message, state: FSMContext):
     finally:
         await client.disconnect()
 
+
 async def show_main_menu(message: types.Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="👥 Guruhlarni tanlash", callback_data="menu_groups")
@@ -97,6 +104,7 @@ async def show_main_menu(message: types.Message, state: FSMContext):
     else:
         await message.answer(text, reply_markup=kb.as_markup())
     await state.set_state(BotStates.main_menu)
+
 
 # --- 4. GURUHLARNI BOSHQARISH ---
 @dp.callback_query(F.data == "menu_groups")
@@ -127,11 +135,13 @@ async def manage_groups(call: types.CallbackQuery, state: FSMContext):
     
     await call.message.edit_text("Guruhlarni boshqarish:", reply_markup=kb.as_markup())
 
+
 # --- 5. XABAR YUBORISH JARAYONI ---
 @dp.callback_query(F.data == "menu_send")
 async def start_sending(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("Xabaringizni yuboring (matn, rasm yoki video):")
     await state.set_state(BotStates.waiting_message)
+
 
 @dp.message(BotStates.waiting_message)
 async def catch_ad_message(message: types.Message, state: FSMContext):
@@ -142,6 +152,7 @@ async def catch_ad_message(message: types.Message, state: FSMContext):
     kb.adjust(3)
     await message.answer("Intervalni tanlang:", reply_markup=kb.as_markup())
     await state.set_state(BotStates.selecting_interval)
+
 
 @dp.callback_query(F.data.startswith("time_"))
 async def confirm_step(call: types.CallbackQuery, state: FSMContext):
@@ -154,17 +165,21 @@ async def confirm_step(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text(f"Interval: {t} min. Jarayonni boshlaymizmi?", reply_markup=kb.as_markup())
     await state.set_state(BotStates.confirm_sending)
 
+
 @dp.callback_query(F.data == "confirm_yes")
 async def start_process(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("🚀 Jarayon boshlandi! Asosiy menyuga qaytilmoqda...")
     await show_main_menu(call, state)
 
+
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu_handler(call: types.CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
 
-# --- ENG MUHIM QISM: BOTNI ISHGA TUSHIRISH ---
+
 async def main():
+    # Eski xabarlarni (offlinedaligingizda kelgan) o'tkazib yuborish
+    await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Bot ishga tushirildi...")
     await dp.start_polling(bot)
 
