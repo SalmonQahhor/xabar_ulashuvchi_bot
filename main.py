@@ -13,7 +13,10 @@ from telethon.sessions import StringSession
 import config
 from database import DB
 
-# 1. HOLATLAR (STATES)
+# 1. GLOBAL CLIENT MANAGER (Sessiyalarni tirik saqlash uchun)
+active_clients = {}
+
+# 2. HOLATLAR (STATES)
 class BotStates(StatesGroup):
     auth_phone = State()      
     auth_code = State()       
@@ -23,20 +26,29 @@ class BotStates(StatesGroup):
     selecting_interval = State() 
     confirm_sending = State()
 
-# 2. LOGGING VA OBYEKTLAR
+# 3. LOGGING VA OBYEKTLAR
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 db = DB()
 
-# --- 3. HANDLERLAR (FUNKSIYALAR) ---
+# --- 4. HANDLERLAR ---
 
-# Buni shunday o'zgartiring:
-@dp.message(Command("start"))
+@dp.message(Command("start"), F.state("*"))
 async def start_cmd(message: types.Message, state: FSMContext):
-    logging.info(f"START buyrug'i keldi: {message.from_user.id}")
-    await state.clear() 
+    user_id = message.from_user.id
+    logging.info(f"START buyrug'i keldi: {user_id}")
+    
+    # Agar user start bossa va eski client ochiq bo'lsa, uni yopamiz
+    if user_id in active_clients:
+        try:
+            await active_clients[user_id].disconnect()
+        except:
+            pass
+        del active_clients[user_id]
+        
+    await state.clear()
     kb = ReplyKeyboardBuilder()
     kb.button(text="📱 Akkauntni ulash", request_contact=True)
     await message.answer(
@@ -45,19 +57,23 @@ async def start_cmd(message: types.Message, state: FSMContext):
     )
     await state.set_state(BotStates.auth_phone)
 
-# Raqamni qabul qilish
+# Raqamni qabul qilish va ulanishni ochish
 @dp.message(BotStates.auth_phone, F.contact | F.text)
 async def process_phone(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
     phone = message.contact.phone_number if message.contact else message.text
     if not phone.startswith('+'): phone = f"+{phone}"
     
-    await state.update_data(phone=phone)
+    # Yangi client yaratamiz va ulanamiz
     client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
     await client.connect()
     
     try:
         sent_code = await client.send_code_request(phone)
-        await state.update_data(phone_code_hash=sent_code.phone_code_hash)
+        # MUHIM: Clientni yopmaymiz, lug'atda saqlab turamiz
+        active_clients[user_id] = client
+        
+        await state.update_data(phone=phone, phone_code_hash=sent_code.phone_code_hash)
         
         await message.answer(
             "📩 Kod yuborildi.\n\n⚠️ **DIQQAT:** Telegram bloklamasligi uchun kodni nuqta bilan yuboring: `1.2.3.4.5`",
@@ -66,29 +82,27 @@ async def process_phone(message: types.Message, state: FSMContext):
         )
         await state.set_state(BotStates.auth_code)
     except Exception as e:
-        await message.answer(f"❌ Xato: {e}")
-    finally:
         await client.disconnect()
+        await message.answer(f"❌ Xato: {e}")
 
-
-
+# Kodni tekshirish (Ochiq turgan client orqali)
 @dp.message(BotStates.auth_code)
 async def process_code(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
     data = await state.get_data()
     
-    # Raqamlarni ajratib olish
-    clean_code = "".join(re.findall(r'\d', message.text)) 
-    logging.info(f"Qabul qilingan kod: {clean_code}") # Logda ko'ramiz
+    # Raqamlarni ajratib olish (Xavfsizlik logikasi)
+    clean_code = "".join(re.findall(r'\d', message.text))
+    logging.info(f"Qabul qilingan kod: {clean_code}")
     
-    if len(clean_code) < 5:
-        await message.answer("❌ Xato: Kod kamida 5 ta raqam bo'lishi kerak.")
+    if user_id not in active_clients:
+        await message.answer("❌ Sessiya muddati o'tgan yoki uzilgan. Qaytadan /start bosing.")
         return
 
-    # Muhim: StringSession() ichiga hech narsa yozmaslik kerak, u vaqtinchalik ulanadi
-    client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
-    await client.connect()
+    client = active_clients[user_id]
+    
     try:
-        # Sign in qilish
+        # Sign in (Aynan o'sha ulanish orqali)
         await client.sign_in(
             phone=data['phone'], 
             code=clean_code, 
@@ -96,25 +110,27 @@ async def process_code(message: types.Message, state: FSMContext):
         )
         
         session_str = client.session.save()
-        db.save_user_session(message.from_user.id, session_str) 
+        db.save_user_session(user_id, session_str) 
         
-        # Guruhlarni olish
+        # Guruhlarni bazaga yuklash
         dialogs = await client.get_dialogs(limit=100)
         for d in dialogs:
             if d.is_group or d.is_channel:
-                db.add_group(message.from_user.id, d.id, d.title)
+                db.add_group(user_id, d.id, d.title)
 
-        await message.answer("✅ Muvaffaqiyatli ulandi! Guruhlar yuklandi.")
+        await message.answer("✅ Akkaunt muvaffaqiyatli ulandi! Guruhlar yuklandi.")
         await show_main_menu(message, state)
+        
+        # Jarayon tugadi, clientni yopamiz
+        await client.disconnect()
+        del active_clients[user_id]
         
     except Exception as e:
         logging.error(f"SignIn xatosi: {e}")
-        await message.answer(f"❌ Xatolik: {e}\n\nEhtimol kodni kiritishga kech qoldingiz. Qaytadan /start bosing.")
-    finally:
-        await client.disconnect()
-        
+        await message.answer(f"❌ Xatolik: {e}\n\nIltimos, kodni tekshirib qaytadan yuboring.")
 
-# Asosiy menyu ko'rinishi
+# --- ASOSIY MENYU VA BOSHQARUV ---
+
 async def show_main_menu(message: types.Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="👥 Guruhlarni tanlash", callback_data="menu_groups")
@@ -129,7 +145,6 @@ async def show_main_menu(message: types.Message, state: FSMContext):
         await message.answer(text, reply_markup=kb.as_markup())
     await state.set_state(BotStates.main_menu)
 
-# Guruhlarni ✅/❌ bilan boshqarish
 @dp.callback_query(F.data == "menu_groups")
 @dp.callback_query(F.data.startswith("toggle_"))
 @dp.callback_query(F.data == "select_all")
@@ -152,7 +167,6 @@ async def manage_groups(call: types.CallbackQuery, state: FSMContext):
     kb.adjust(1)
     await call.message.edit_text("Guruhlarni tanlang:", reply_markup=kb.as_markup())
 
-# Xabar va interval bosqichi
 @dp.callback_query(F.data == "menu_send")
 async def start_send(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("Xabaringizni yuboring:")
@@ -186,9 +200,8 @@ async def process_start(call: types.CallbackQuery, state: FSMContext):
 async def back_to_menu(call: types.CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
 
-# --- 4. ISHGA TUSHIRISH (MAIN) ---
+# --- ISHGA TUSHIRISH ---
 async def main():
-    # Eng muhim joyi: webhookni o'chirib pollingni toza boshlash
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Bot pollingni boshladi...")
     await dp.start_polling(bot)
