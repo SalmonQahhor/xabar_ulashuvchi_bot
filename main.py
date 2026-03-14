@@ -11,7 +11,7 @@ from telethon.sessions import StringSession
 import config
 from database import DB
 
-
+# 1. Holatlar (States) - Har doim yuqorida turishi kerak
 class BotStates(StatesGroup):
     auth_phone = State()      
     auth_code = State()       
@@ -21,15 +21,17 @@ class BotStates(StatesGroup):
     selecting_interval = State() 
     confirm_sending = State()
 
-# Sozlamalar
+# 2. Sozlamalar va Obyektlar
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 db = DB()
 
 # --- 1. START: FAQAT BITTA TUGMA ---
-@dp.message(Command("start"))
+# F.state("*") qo'shildi - har qanday holatda start ishlaydi
+@dp.message(Command("start"), F.state("*"))
 async def start_cmd(message: types.Message, state: FSMContext):
+    await state.clear() # Eski holatlarni tozalaymiz
     kb = ReplyKeyboardBuilder()
     kb.button(text="📱 Akkauntni ulash", request_contact=True)
     await message.answer(
@@ -49,11 +51,9 @@ async def process_phone(message: types.Message, state: FSMContext):
     await client.connect()
     
     try:
-        # Kod so'rash
         sent_code = await client.send_code_request(phone)
         await state.update_data(phone_code_hash=sent_code.phone_code_hash)
         
-        # Tugmani yo'qotish va kod so'rash
         await message.answer(
             "📩 Kod yuborildi. Iltimos, kodni kiriting (shunchaki matn ko'rinishida):",
             reply_markup=types.ReplyKeyboardRemove()
@@ -75,7 +75,7 @@ async def process_code(message: types.Message, state: FSMContext):
     try:
         await client.sign_in(data['phone'], code, phone_code_hash=data['phone_code_hash'])
         session_str = client.session.save()
-        db.save_user_session(message.from_user.id, session_str) # Sessiyani saqlash
+        db.save_user_session(message.from_user.id, session_str) 
         
         await message.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
         await show_main_menu(message, state)
@@ -98,20 +98,17 @@ async def show_main_menu(message: types.Message, state: FSMContext):
         await message.answer(text, reply_markup=kb.as_markup())
     await state.set_state(BotStates.main_menu)
 
-# --- 4. GURUHLARNI BOSHQARISH (MULTI-SELECT) ---
+# --- 4. GURUHLARNI BOSHQARISH ---
 @dp.callback_query(F.data == "menu_groups")
 @dp.callback_query(F.data.startswith("toggle_group_"))
 @dp.callback_query(F.data == "select_all")
 async def manage_groups(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
-    # Bu yerda DB dan guruhlarni va tanlangan holatni olamiz
-    # Misol uchun mantiq:
     data = await state.get_data()
-    selected = data.get("selected_groups", []) # IDlar ro'yxati
+    selected = data.get("selected_groups", []) 
     
     if call.data == "select_all":
-        # Hammasini tanlash mantiqi
-        pass
+        pass 
     elif call.data.startswith("toggle_group_"):
         group_id = int(call.data.split("_")[2])
         if group_id in selected: selected.remove(group_id)
@@ -119,7 +116,6 @@ async def manage_groups(call: types.CallbackQuery, state: FSMContext):
         await state.update_data(selected_groups=selected)
 
     kb = InlineKeyboardBuilder()
-    # Guruhlar ro'yxatini DB dan chiqaramiz
     all_groups = db.get_user_groups(user_id)
     for g_id, g_name in all_groups:
         mark = "✅" if g_id in selected else "❌"
@@ -139,14 +135,11 @@ async def start_sending(call: types.CallbackQuery, state: FSMContext):
 
 @dp.message(BotStates.waiting_message)
 async def catch_ad_message(message: types.Message, state: FSMContext):
-    # Xabarni copy qilish uchun IDlarni saqlaymiz
     await state.update_data(msg_id=message.message_id, chat_id=message.chat.id)
-    
     kb = InlineKeyboardBuilder()
     for t in [5, 10, 15, 20, 30, 60]:
         kb.button(text=f"{t} min", callback_data=f"time_{t}")
     kb.adjust(3)
-    
     await message.answer("Intervalni tanlang:", reply_markup=kb.as_markup())
     await state.set_state(BotStates.selecting_interval)
 
@@ -154,21 +147,29 @@ async def catch_ad_message(message: types.Message, state: FSMContext):
 async def confirm_step(call: types.CallbackQuery, state: FSMContext):
     t = call.data.split("_")[1]
     await state.update_data(interval=t)
-    
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Ha", callback_data="confirm_yes")
     kb.button(text="❌ Yo'q", callback_data="back_to_menu")
     kb.adjust(1)
-    
     await call.message.edit_text(f"Interval: {t} min. Jarayonni boshlaymizmi?", reply_markup=kb.as_markup())
     await state.set_state(BotStates.confirm_sending)
 
 @dp.callback_query(F.data == "confirm_yes")
 async def start_process(call: types.CallbackQuery, state: FSMContext):
     await call.message.answer("🚀 Jarayon boshlandi! Asosiy menyuga qaytilmoqda...")
-    # Bu yerda APScheduler ga topshiriq beriladi
     await show_main_menu(call, state)
 
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu_handler(call: types.CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
+
+# --- ENG MUHIM QISM: BOTNI ISHGA TUSHIRISH ---
+async def main():
+    logging.info("Bot ishga tushirildi...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot to'xtatildi")
