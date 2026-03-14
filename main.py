@@ -149,7 +149,8 @@ async def process_password(message: types.Message, state: FSMContext):
         await client.sign_in(password=password)
         await save_and_finish_login(message, state, client, user_id)
     except Exception as e:
-        await message.answer("❌ Parol noto'g'ri. Qaytadan urinib ko'ring:")
+        # Xatoni ochiq-oydin yozamiz
+        await message.answer(f"❌ Xatolik yuz berdi: {e}")
 
 # MUVAFFAQIYATLI LOGINDAN KEYINGI JARAYON
 async def save_and_finish_login(message: types.Message, state: FSMContext, client: TelegramClient, user_id: int):
