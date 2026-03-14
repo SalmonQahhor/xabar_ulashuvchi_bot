@@ -152,6 +152,7 @@ async def process_password(message: types.Message, state: FSMContext):
         # Xatoni ochiq-oydin yozamiz
         await message.answer(f"❌ Xatolik yuz berdi: {e}")
 
+
 # MUVAFFAQIYATLI LOGINDAN KEYINGI JARAYON
 async def save_and_finish_login(message: types.Message, state: FSMContext, client: TelegramClient, user_id: int):
     wait_msg = await message.answer("⏳ Ulanish muvaffaqiyatli! Guruhlar yuklanmoqda...")
@@ -159,15 +160,15 @@ async def save_and_finish_login(message: types.Message, state: FSMContext, clien
     session_str = client.session.save()
     db.save_user_session(user_id, session_str) 
     
-    dialogs = await client.get_dialogs(limit=100)
+    dialogs = await client.get_dialogs(limit=200) # Ko'proq dialoglarni ko'rish uchun limitni oshirdik
     for d in dialogs:
-        if d.is_group or d.is_channel:
+        # FAQAT guruhlarni saqlaymiz (Kanallar va shaxsiy chatlar kirmaydi)
+        if d.is_group: 
             db.add_group(user_id, d.id, d.title)
 
     await wait_msg.delete()
     await show_main_menu(message, state)
-    
-    await cleanup_client(user_id) # Ish bitdi, ulanishni yopamiz
+    await cleanup_client(user_id)
 
 # --- ASOSIY MENYU VA BOSHQARUV ---
 async def show_main_menu(message: types.Message, state: FSMContext):
