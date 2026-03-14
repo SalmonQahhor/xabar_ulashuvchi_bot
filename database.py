@@ -114,3 +114,13 @@ class DB:
         self._check_conn()
         self.cursor.execute("SELECT chat_id FROM user_groups WHERE user_id = %s AND is_enabled = TRUE", (user_id,))
         return [row['chat_id'] for row in self.cursor.fetchall()]
+        
+
+    def clear_user_groups(self, user_id):
+        """Yangi login bo'lganda eski guruhlar ro'yxatini tozalash"""
+        self._check_conn()
+        sql = "DELETE FROM user_groups WHERE user_id = %s"
+        self.cursor.execute(sql, (user_id,))
+        self.conn.commit()
+
+
