@@ -165,20 +165,30 @@ async def process_password(message: types.Message, state: FSMContext):
 
 # MUVAFFAQIYATLI LOGINDAN KEYINGI JARAYON
 async def save_and_finish_login(message: types.Message, state: FSMContext, client: TelegramClient, user_id: int):
-    wait_msg = await message.answer("⏳ Ulanish muvaffaqiyatli! Guruhlar yuklanmoqda...")
+    wait_msg = await message.answer("⏳ Ulanish muvaffaqiyatli! Faqat guruhlar saralanmoqda...")
     
     session_str = client.session.save()
     db.save_user_session(user_id, session_str) 
     
-    dialogs = await client.get_dialogs(limit=200) # Ko'proq dialoglarni ko'rish uchun limitni oshirdik
+    # Avval bazadagi eski (aralashgan) guruhlarni tozalaymiz
+    db.clear_user_groups(user_id) 
+    
+    dialogs = await client.get_dialogs(limit=300) 
+    count = 0
     for d in dialogs:
-        # FAQAT guruhlarni saqlaymiz (Kanallar va shaxsiy chatlar kirmaydi)
-        if d.is_group: 
+        # broadcast = False va is_channel = True -> Bu Superguruh (Guruh)
+        # is_group = True -> Bu oddiy guruh
+        is_supergroup = d.is_channel and not d.broadcast
+        
+        if d.is_group or is_supergroup:
             db.add_group(user_id, d.id, d.title)
+            count += 1
 
     await wait_msg.delete()
+    await message.answer(f"✅ Tayyor! {count} ta guruh topildi va saqlandi.")
     await show_main_menu(message, state)
     await cleanup_client(user_id)
+    
 
 # --- ASOSIY MENYU VA BOSHQARUV ---
 async def show_main_menu(message: types.Message, state: FSMContext):
