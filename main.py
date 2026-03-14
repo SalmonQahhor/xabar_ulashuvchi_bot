@@ -70,35 +70,49 @@ async def process_phone(message: types.Message, state: FSMContext):
     finally:
         await client.disconnect()
 
-# Nuqtali kodni qabul qilish
+
+
 @dp.message(BotStates.auth_code)
 async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
+    
+    # Raqamlarni ajratib olish
     clean_code = "".join(re.findall(r'\d', message.text)) 
+    logging.info(f"Qabul qilingan kod: {clean_code}") # Logda ko'ramiz
     
     if len(clean_code) < 5:
-        await message.answer("❌ Xato kod. Kamida 5 ta raqam bo'lishi kerak.")
+        await message.answer("❌ Xato: Kod kamida 5 ta raqam bo'lishi kerak.")
         return
 
+    # Muhim: StringSession() ichiga hech narsa yozmaslik kerak, u vaqtinchalik ulanadi
     client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
     await client.connect()
     try:
-        await client.sign_in(data['phone'], clean_code, phone_code_hash=data['phone_code_hash'])
+        # Sign in qilish
+        await client.sign_in(
+            phone=data['phone'], 
+            code=clean_code, 
+            phone_code_hash=data['phone_code_hash']
+        )
+        
         session_str = client.session.save()
         db.save_user_session(message.from_user.id, session_str) 
         
-        # Guruhlarni bazaga yuklash
-        dialogs = await client.get_dialogs()
+        # Guruhlarni olish
+        dialogs = await client.get_dialogs(limit=100)
         for d in dialogs:
             if d.is_group or d.is_channel:
                 db.add_group(message.from_user.id, d.id, d.title)
 
-        await message.answer("✅ Akkaunt ulandi!")
+        await message.answer("✅ Muvaffaqiyatli ulandi! Guruhlar yuklandi.")
         await show_main_menu(message, state)
+        
     except Exception as e:
-        await message.answer(f"❌ Xatolik: {e}")
+        logging.error(f"SignIn xatosi: {e}")
+        await message.answer(f"❌ Xatolik: {e}\n\nEhtimol kodni kiritishga kech qoldingiz. Qaytadan /start bosing.")
     finally:
         await client.disconnect()
+        
 
 # Asosiy menyu ko'rinishi
 async def show_main_menu(message: types.Message, state: FSMContext):
