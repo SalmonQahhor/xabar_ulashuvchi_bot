@@ -28,18 +28,29 @@ class DB:
         except:
             self.connect()
 
-    def _create_tables(self):
-        """Kerakli jadvallar borligini tekshirish va yaratish"""
-        # users jadvaliga session_str ustunini qo'shish yoki jadvalni yaratish
+
+def _create_tables(self):
+        """Jadvallar va ustunlar borligini tekshirish"""
+        self._check_conn()
+        # 1. Jadvalni yaratish (agar yo'q bo'lsa)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
-                session_str TEXT,
                 message_id INT,
                 from_chat_id BIGINT,
                 is_active BOOLEAN DEFAULT TRUE
             )
         """)
+        
+        # 2. session_str ustuni borligini tekshirish va qo'shish
+        try:
+            self.cursor.execute("SELECT session_str FROM users LIMIT 1")
+        except mysql.connector.Error as err:
+            if err.errno == 1054:  # Unknown column xatosi
+                logging.info("Adding 'session_str' column to 'users' table...")
+                self.cursor.execute("ALTER TABLE users ADD COLUMN session_str TEXT")
+        
+        # 3. user_groups jadvali
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_groups (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -51,6 +62,7 @@ class DB:
             )
         """)
         self.conn.commit()
+
 
     # --- SIZDA YO'Q BO'LGAN VA KERAKLI FUNKSIYALAR ---
 
