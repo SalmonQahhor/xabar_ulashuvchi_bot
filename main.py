@@ -50,19 +50,29 @@ async def cleanup_client(user_id):
 @dp.message(Command("start"), StateFilter("*"))
 async def start_cmd(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    logging.info(f"🔄 START bosildi: {user_id}")
+    logging.info(f"🚀 START bosildi: {user_id}")
     
-    # Eski ulanishlarni va holatlarni tozalab tashlaymiz
-    await cleanup_client(user_id)
     await state.clear()
-    
-    kb = ReplyKeyboardBuilder()
-    kb.button(text="📱 Akkauntni ulash", request_contact=True)
-    await message.answer(
-        "👋 Xush kelibsiz!\n\nBotdan foydalanish uchun avval Telegram akkauntingizni ulashingiz kerak. Quyidagi tugmani bosing:",
-        reply_markup=kb.as_markup(resize_keyboard=True)
-    )
-    await state.set_state(BotStates.auth_phone)
+    await cleanup_client(user_id) # Vaqtinchalik ulanishlarni yopish
+
+    # 1. Bazadan foydalanuvchi ma'lumotlarini olish
+    user_data = db.get_user(user_id)
+
+    # 2. Agar sessiya satri bazada mavjud bo'lsa
+    if user_data and user_data.get('session_str'):
+        logging.info(f"✅ Sessiya topildi: {user_id}")
+        await message.answer(f"👋 Xush kelibsiz, {message.from_user.first_name}!")
+        await show_main_menu(message, state)
+    else:
+        # 3. Sessiya bo'lmasa, ulanishni boshlash
+        logging.info(f"🔍 Sessiya topilmadi, login boshlanmoqda: {user_id}")
+        kb = ReplyKeyboardBuilder()
+        kb.button(text="📱 Akkauntni ulash", request_contact=True)
+        await message.answer(
+            "Xush kelibsiz! Botdan foydalanish uchun avval akkauntingizni ulashingiz kerak.",
+            reply_markup=kb.as_markup(resize_keyboard=True)
+        )
+        await state.set_state(BotStates.auth_phone)
 
 # RAQAM QABUL QILISH
 @dp.message(BotStates.auth_phone, F.contact | F.text)
@@ -239,6 +249,24 @@ async def process_start(call: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu(call: types.CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
+
+
+@dp.callback_query(F.data == "menu_help")
+async def show_help(call: types.CallbackQuery):
+    help_text = (
+        "📖 **Botdan foydalanish bo'yicha qo'llanma:**\n\n"
+        "1️⃣ **Akkaunt ulanishi:** /start buyrug'ini bering va raqamingizni yuboring.\n"
+        "2️⃣ **Guruhlarni tanlash:** 'Guruhlarni tanlash' tugmasi orqali xabar yubormoqchi bo'lgan guruhlaringizni ✅ belgilang.\n"
+        "3️⃣ **Xabar yuborish:** 'Xabar yuborish' tugmasini bosing, matnni yuboring va vaqt oralig'ini (interval) tanlang.\n"
+        "4️⃣ **To'xtatish:** Agar jarayonni to'xtatmoqchi bo'lsangiz, botga qayta /start bosing.\n\n"
+        "⚠️ **Eslatma:** Faqat o'zingiz a'zo bo'lgan va xabar yozishga ruxsati bor guruhlar ro'yxatda chiqadi."
+    )
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 Ortga", callback_data="back_to_menu")
+    
+    await call.message.edit_text(help_text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+
 
 # --- ISHGA TUSHIRISH ---
 async def main():
