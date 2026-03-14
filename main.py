@@ -11,6 +11,16 @@ from telethon.sessions import StringSession
 import config
 from database import DB
 
+
+class BotStates(StatesGroup):
+    auth_phone = State()      
+    auth_code = State()       
+    main_menu = State()       
+    selecting_groups = State() 
+    waiting_message = State()  
+    selecting_interval = State() 
+    confirm_sending = State()
+
 # Sozlamalar
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN)
