@@ -32,15 +32,13 @@ db = DB()
 
 # --- 3. HANDLERLAR (FUNKSIYALAR) ---
 
-# START buyrug'i har doim eng tepada turishi kerak
-@dp.message(Command("start"), F.state("*"))
+# Buni shunday o'zgartiring:
+@dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
-    logging.info(f"START bosildi: {message.from_user.id}")
+    logging.info(f"START buyrug'i keldi: {message.from_user.id}")
     await state.clear() 
-    
     kb = ReplyKeyboardBuilder()
     kb.button(text="📱 Akkauntni ulash", request_contact=True)
-    
     await message.answer(
         "Xush kelibsiz! Botdan foydalanish uchun avval akkauntni ulashingiz kerak.",
         reply_markup=kb.as_markup(resize_keyboard=True)
