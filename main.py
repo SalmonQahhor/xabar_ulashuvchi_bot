@@ -1,163 +1,164 @@
 import asyncio
 import logging
-import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-
-from telethon import TelegramClient, functions, types as tele_types
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from telethon import TelegramClient
 from telethon.sessions import StringSession
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from database import DB
 import config
-from users import ALLOWED_USERS
+from database import DB
 
-# Loglarni sozlash
+# Sozlamalar
 logging.basicConfig(level=logging.INFO)
-
-# Sessions papkasini yaratish
-if not os.path.exists("sessions"):
-    os.makedirs("sessions")
-
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 db = DB()
-scheduler = AsyncIOScheduler()
 
-class LoginSteps(StatesGroup):
-    phone = State()
-    code = State()
-
-# --- START BUYRUG'I ---
+# --- 1. START: FAQAT BITTA TUGMA ---
 @dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in ALLOWED_USERS:
-        return await message.answer(f"❌ Ruxsat yo'q. ID: {user_id}")
-    
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📱 Akkauntni ulash", callback_data="connect")
-    kb.button(text="🕒 Interval", callback_data="time_menu")
-    kb.button(text="👥 Guruhlar", callback_data="refresh_groups")
-    kb.button(text="🚀 Start/Stop", callback_data="toggle_bot")
-    kb.adjust(2)
-    await message.answer("Boshqaruv paneli:", reply_markup=kb.as_markup())
-
-# --- LOGIN JARAYONI ---
-@dp.callback_query(F.data == "connect")
-async def start_login(call: types.CallbackQuery, state: FSMContext):
-    # Raqam yuborish tugmasi
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Raqamni yuborish", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
+async def start_cmd(message: types.Message, state: FSMContext):
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="📱 Akkauntni ulash", request_contact=True)
+    await message.answer(
+        "Xush kelibsiz! Botdan foydalanish uchun avval akkauntni ulashingiz kerak.",
+        reply_markup=kb.as_markup(resize_keyboard=True)
     )
-    await call.message.answer("Pastdagi tugmani bosing yoki raqamni yuboring:", reply_markup=kb)
-    await state.set_state(LoginSteps.phone)
-    await call.answer()
+    await state.set_state(BotStates.auth_phone)
 
-
-
-@dp.message(LoginSteps.phone)
+# --- 2. RAQAM YUBORILGANDAN SO'NG ---
+@dp.message(BotStates.auth_phone, F.contact | F.text)
 async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.contact.phone_number if message.contact else message.text.strip()
+    phone = message.contact.phone_number if message.contact else message.text
     if not phone.startswith('+'): phone = f"+{phone}"
+    
     await state.update_data(phone=phone)
-    
-    # Clientni sozlashda device va system ma'lumotlarini qo'shamiz (blokdan qochish uchun)
-    client = TelegramClient(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH, 
-                            device_model="XabarBot v2", system_version="Linux")
-    
+    client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
     await client.connect()
+    
     try:
-        logging.info(f"Kod so'ralmoqda: {phone}")
-        result = await client.send_code_request(phone)
-        await state.update_data(phone_code_hash=result.phone_code_hash)
+        # Kod so'rash
+        sent_code = await client.send_code_request(phone)
+        await state.update_data(phone_code_hash=sent_code.phone_code_hash)
         
-        await message.answer("📩 Kod Telegram ilovangizga yuborildi. Iltimos, kodni kiriting:")
-        await state.set_state(LoginSteps.code)
-        logging.info("Kod so'rovi muvaffaqiyatli o'tdi.")
+        # Tugmani yo'qotish va kod so'rash
+        await message.answer(
+            "📩 Kod yuborildi. Iltimos, kodni kiriting (shunchaki matn ko'rinishida):",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        await state.set_state(BotStates.auth_code)
     except Exception as e:
-        logging.error(f"TELETHON XATOSI: {e}")
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
-        await state.clear()
+        await message.answer(f"❌ Xato: {e}")
     finally:
         await client.disconnect()
 
-
-
-
-@dp.message(LoginSteps.code)
+# --- 3. KOD KIRITILSA VA ASOSIY MENYU ---
+@dp.message(BotStates.auth_code)
 async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
     code = message.text.strip()
     
-    client = TelegramClient(f"sessions/{message.from_user.id}", config.API_ID, config.API_HASH)
+    client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
     await client.connect()
-    
     try:
         await client.sign_in(data['phone'], code, phone_code_hash=data['phone_code_hash'])
-        db.add_allowed_user(message.from_user.id)
+        session_str = client.session.save()
+        db.save_user_session(message.from_user.id, session_str) # Sessiyani saqlash
+        
         await message.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
+        await show_main_menu(message, state)
     except Exception as e:
-        await message.answer(f"❌ Xato: {str(e)}")
+        await message.answer(f"❌ Kod xato yoki muddati o'tgan: {e}")
     finally:
         await client.disconnect()
-        await state.clear()
 
-# --- GURUHLARNI YANGILASH ---
-@dp.callback_query(F.data == "refresh_groups")
-async def refresh_groups(call: types.CallbackQuery):
-    user_id = call.from_user.id
-    client = TelegramClient(f"sessions/{user_id}", config.API_ID, config.API_HASH)
-    await client.connect()
-    
-    if not await client.is_user_authorized():
-        await client.disconnect()
-        return await call.answer("Avval akkauntni ulang!", show_alert=True)
-
-    groups = []
-    async for dialog in client.iter_dialogs():
-        if dialog.is_group or dialog.is_channel:
-            # Telethonda dialog.is_channel ham guruhlarni (supergroup) o'z ichiga oladi
-            groups.append((dialog.id, dialog.name))
-    
-    db.sync_groups(user_id, groups)
-    await client.disconnect()
-    await call.message.answer(f"✅ {len(groups)} ta guruh bazaga qo'shildi!")
-    await call.answer()
-
-# --- INTERVAL VA SOZLAMALAR ---
-@dp.callback_query(F.data == "time_menu")
-async def time_menu(call: types.CallbackQuery):
+async def show_main_menu(message: types.Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
-    for t in [5, 10, 15, 30, 60]:
-        kb.button(text=f"{t} min", callback_data=f"settime_{t}")
+    kb.button(text="👥 Guruhlarni tanlash", callback_data="menu_groups")
+    kb.button(text="🚀 Xabar yuborish", callback_data="menu_send")
+    kb.button(text="ℹ️ Qo'llanma", callback_data="menu_help")
+    kb.adjust(1)
+    
+    text = "Asosiy menyu:"
+    if isinstance(message, types.CallbackQuery):
+        await message.message.edit_text(text, reply_markup=kb.as_markup())
+    else:
+        await message.answer(text, reply_markup=kb.as_markup())
+    await state.set_state(BotStates.main_menu)
+
+# --- 4. GURUHLARNI BOSHQARISH (MULTI-SELECT) ---
+@dp.callback_query(F.data == "menu_groups")
+@dp.callback_query(F.data.startswith("toggle_group_"))
+@dp.callback_query(F.data == "select_all")
+async def manage_groups(call: types.CallbackQuery, state: FSMContext):
+    user_id = call.from_user.id
+    # Bu yerda DB dan guruhlarni va tanlangan holatni olamiz
+    # Misol uchun mantiq:
+    data = await state.get_data()
+    selected = data.get("selected_groups", []) # IDlar ro'yxati
+    
+    if call.data == "select_all":
+        # Hammasini tanlash mantiqi
+        pass
+    elif call.data.startswith("toggle_group_"):
+        group_id = int(call.data.split("_")[2])
+        if group_id in selected: selected.remove(group_id)
+        else: selected.append(group_id)
+        await state.update_data(selected_groups=selected)
+
+    kb = InlineKeyboardBuilder()
+    # Guruhlar ro'yxatini DB dan chiqaramiz
+    all_groups = db.get_user_groups(user_id)
+    for g_id, g_name in all_groups:
+        mark = "✅" if g_id in selected else "❌"
+        kb.button(text=f"{mark} {g_name}", callback_data=f"toggle_group_{g_id}")
+    
+    kb.button(text="🌟 Hammasini tanlash", callback_data="select_all")
+    kb.button(text="🔙 Ortga", callback_data="back_to_menu")
+    kb.adjust(1)
+    
+    await call.message.edit_text("Guruhlarni boshqarish:", reply_markup=kb.as_markup())
+
+# --- 5. XABAR YUBORISH JARAYONI ---
+@dp.callback_query(F.data == "menu_send")
+async def start_sending(call: types.CallbackQuery, state: FSMContext):
+    await call.message.edit_text("Xabaringizni yuboring (matn, rasm yoki video):")
+    await state.set_state(BotStates.waiting_message)
+
+@dp.message(BotStates.waiting_message)
+async def catch_ad_message(message: types.Message, state: FSMContext):
+    # Xabarni copy qilish uchun IDlarni saqlaymiz
+    await state.update_data(msg_id=message.message_id, chat_id=message.chat.id)
+    
+    kb = InlineKeyboardBuilder()
+    for t in [5, 10, 15, 20, 30, 60]:
+        kb.button(text=f"{t} min", callback_data=f"time_{t}")
     kb.adjust(3)
-    await call.message.edit_text("Intervalni tanlang:", reply_markup=kb.as_markup())
+    
+    await message.answer("Intervalni tanlang:", reply_markup=kb.as_markup())
+    await state.set_state(BotStates.selecting_interval)
 
-@dp.callback_query(F.data.startswith("settime_"))
-async def set_time(call: types.CallbackQuery):
-    t = int(call.data.split("_")[1])
-    db.update_user(call.from_user.id, interval_min=t)
-    await call.answer(f"Sozlandi: {t} min", show_alert=True)
+@dp.callback_query(F.data.startswith("time_"))
+async def confirm_step(call: types.CallbackQuery, state: FSMContext):
+    t = call.data.split("_")[1]
+    await state.update_data(interval=t)
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Ha", callback_data="confirm_yes")
+    kb.button(text="❌ Yo'q", callback_data="back_to_menu")
+    kb.adjust(1)
+    
+    await call.message.edit_text(f"Interval: {t} min. Jarayonni boshlaymizmi?", reply_markup=kb.as_markup())
+    await state.set_state(BotStates.confirm_sending)
 
-@dp.message(F.text | F.photo | F.video)
-async def catch_msg(message: types.Message):
-    db.update_user(message.from_user.id, message_id=message.message_id, from_chat_id=message.chat.id)
-    await message.answer("✅ Reklama xabari saqlandi!")
+@dp.callback_query(F.data == "confirm_yes")
+async def start_process(call: types.CallbackQuery, state: FSMContext):
+    await call.message.answer("🚀 Jarayon boshlandi! Asosiy menyuga qaytilmoqda...")
+    # Bu yerda APScheduler ga topshiriq beriladi
+    await show_main_menu(call, state)
 
-async def check_and_run_tasks():
-    logging.info("Tekshirilmoqda...")
-
-async def main():
-    scheduler.add_job(check_and_run_tasks, "interval", minutes=1)
-    scheduler.start()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu_handler(call: types.CallbackQuery, state: FSMContext):
+    await show_main_menu(call, state)
