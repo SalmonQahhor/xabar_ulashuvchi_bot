@@ -1,12 +1,13 @@
 import asyncio
 import logging
-import re  # Kodni tozalash uchun qo'shildi
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from telethon import TelegramClient
+from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
 
 import config
@@ -22,18 +23,20 @@ class BotStates(StatesGroup):
     selecting_interval = State() 
     confirm_sending = State()
 
-# 2. Sozlamalar va Obyektlar
+# 2. Sozlamalar
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 db = DB()
 
-# --- 1. START HANDLER ---
+# --- 3. START HANDLER ---
 @dp.message(Command("start"), F.state("*"))
 async def start_cmd(message: types.Message, state: FSMContext):
-    logging.info(f"Start buyrug'i keldi: {message.from_user.id}")
-    await state.clear() 
+    await state.clear()
+    logging.info(f"User {message.from_user.id} started the bot")
     
+    # Faqat bitta tugma
     kb = ReplyKeyboardBuilder()
     kb.button(text="📱 Akkauntni ulash", request_contact=True)
     
@@ -43,7 +46,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
     )
     await state.set_state(BotStates.auth_phone)
 
-# --- 2. RAQAM YUBORILGANDAN SO'NG ---
+# --- 4. RAQAM VA KODNI QABUL QILISH ---
 @dp.message(BotStates.auth_phone, F.contact | F.text)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
@@ -59,7 +62,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         
         await message.answer(
             "📩 Kod yuborildi.\n\n"
-            "⚠️ **DIQQAT:** Telegram kodni bloklamasligi uchun uni raqamlar orasiga nuqta qo'yib yuboring!\n"
+            "⚠️ **DIQQAT:** Telegram bloklamasligi uchun kodni nuqtalar bilan yuboring!\n"
             "Misol: `1.2.3.4.5`",
             reply_markup=types.ReplyKeyboardRemove(),
             parse_mode="Markdown"
@@ -70,17 +73,13 @@ async def process_phone(message: types.Message, state: FSMContext):
     finally:
         await client.disconnect()
 
-# --- 3. KOD KIRITILSA VA ASOSIY MENYU ---
 @dp.message(BotStates.auth_code)
 async def process_code(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    
-    # KODNI TOZALASH: "1.2.3.4.5" -> "12345"
-    raw_code = message.text.strip()
-    clean_code = "".join(re.findall(r'\d', raw_code)) 
+    clean_code = "".join(re.findall(r'\d', message.text)) 
     
     if len(clean_code) < 5:
-        await message.answer("❌ Xato: Kod kamida 5 ta raqamdan iborat bo'lishi kerak. Iltimos, nuqtalar bilan yuboring (1.2.3.4.5)")
+        await message.answer("❌ Xato kod. Nuqtalar bilan yuboring (1.2.3.4.5)")
         return
 
     client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
@@ -90,14 +89,20 @@ async def process_code(message: types.Message, state: FSMContext):
         session_str = client.session.save()
         db.save_user_session(message.from_user.id, session_str) 
         
-        await message.answer("✅ Akkaunt muvaffaqiyatli ulandi!")
+        # Akkaunt ulanishi bilan guruhlarni bir marta skanerlab bazaga saqlaymiz
+        dialogs = await client.get_dialogs()
+        for dialog in dialogs:
+            if dialog.is_group or dialog.is_channel:
+                db.add_group(message.from_user.id, dialog.id, dialog.title)
+
+        await message.answer("✅ Akkaunt muvaffaqiyatli ulandi va guruhlar yuklandi!")
         await show_main_menu(message, state)
     except Exception as e:
-        logging.error(f"SignIn Error: {e}")
-        await message.answer(f"❌ Kod xato yoki muddati o'tgan: {e}")
+        await message.answer(f"❌ Xatolik: {e}")
     finally:
         await client.disconnect()
 
+# --- 5. ASOSIY MENYU ---
 async def show_main_menu(message: types.Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text="👥 Guruhlarni tanlash", callback_data="menu_groups")
@@ -112,89 +117,80 @@ async def show_main_menu(message: types.Message, state: FSMContext):
         await message.answer(text, reply_markup=kb.as_markup())
     await state.set_state(BotStates.main_menu)
 
-# --- 4. GURUHLARNI BOSHQARISH ---
+# --- 6. GURUHLARNI MULTI-SELECT BILAN BOSHQARISH ---
 @dp.callback_query(F.data == "menu_groups")
-@dp.callback_query(F.data.startswith("toggle_group_"))
+@dp.callback_query(F.data.startswith("toggle_"))
 @dp.callback_query(F.data == "select_all")
 async def manage_groups(call: types.CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
-    data = await state.get_data()
-    selected = data.get("selected_groups", []) 
     
     if call.data == "select_all":
-        # Bu yerda db.get_user_groups dan hamma IDlarni olish logikasini qo'shishingiz mumkin
-        pass 
-    elif call.data.startswith("toggle_group_"):
-        group_id = int(call.data.split("_")[2])
-        if group_id in selected: selected.remove(group_id)
-        else: selected.append(group_id)
-        await state.update_data(selected_groups=selected)
+        db.select_all_groups(user_id, True)
+    elif call.data.startswith("toggle_"):
+        group_id = call.data.split("_")[1]
+        db.toggle_group_status(user_id, group_id)
 
+    groups = db.get_user_groups(user_id) # [(id, name, is_selected), ...]
     kb = InlineKeyboardBuilder()
-    all_groups = db.get_user_groups(user_id)
-    if not all_groups:
-        await call.answer("Sizda hali guruhlar yo'q yoki yuklanmagan.", show_alert=True)
-        return
-
-    for g_id, g_name in all_groups:
-        mark = "✅" if g_id in selected else "❌"
-        kb.button(text=f"{mark} {g_name}", callback_data=f"toggle_group_{g_id}")
+    
+    for g_id, g_name, is_selected in groups:
+        mark = "✅" if is_selected else "❌"
+        kb.button(text=f"{mark} {g_name}", callback_data=f"toggle_{g_id}")
     
     kb.button(text="🌟 Hammasini tanlash", callback_data="select_all")
     kb.button(text="🔙 Ortga", callback_data="back_to_menu")
     kb.adjust(1)
     
-    await call.message.edit_text("Guruhlarni tanlang:", reply_markup=kb.as_markup())
+    await call.message.edit_text("Guruhlarni tanlang (✅ - yuboriladi, ❌ - yuborilmaydi):", reply_markup=kb.as_markup())
 
-# --- 5. XABAR YUBORISH JARAYONI ---
+# --- 7. XABAR YUBORISH VA INTERVAL ---
 @dp.callback_query(F.data == "menu_send")
 async def start_sending(call: types.CallbackQuery, state: FSMContext):
-    await call.message.edit_text("Xabaringizni yuboring (matn, rasm yoki video):")
+    await call.message.edit_text("Xabaringizni yuboring (Matn, rasm, video farqi yo'q):")
     await state.set_state(BotStates.waiting_message)
 
 @dp.message(BotStates.waiting_message)
-async def catch_ad_message(message: types.Message, state: FSMContext):
-    # Xabarni nusxalash uchun ma'lumotlarni saqlash
-    await state.update_data(msg_id=message.message_id, chat_id=message.chat.id)
+async def catch_msg(message: types.Message, state: FSMContext):
+    # Xabarni keyinroq copy qilish uchun saqlab qo'yamiz
+    await state.update_data(msg_id=message.message_id, from_chat_id=message.chat.id)
     
     kb = InlineKeyboardBuilder()
     for t in [5, 10, 15, 20, 30, 60]:
         kb.button(text=f"{t} min", callback_data=f"time_{t}")
     kb.adjust(3)
     
-    await message.answer("Xabar qabul qilindi. Intervalni tanlang:", reply_markup=kb.as_markup())
+    await message.answer("Intervalni tanlang:", reply_markup=kb.as_markup())
     await state.set_state(BotStates.selecting_interval)
 
 @dp.callback_query(F.data.startswith("time_"))
-async def confirm_step(call: types.CallbackQuery, state: FSMContext):
-    t = call.data.split("_")[1]
-    await state.update_data(interval=t)
+async def set_time(call: types.CallbackQuery, state: FSMContext):
+    interval = call.data.split("_")[1]
+    await state.update_data(interval=interval)
     
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Ha", callback_data="confirm_yes")
-    kb.button(text="❌ Yo'q", callback_data="back_to_menu")
+    kb.button(text="✅ Ha, boshlansin", callback_data="confirm_yes")
+    kb.button(text="❌ Yo'q, bekor qilish", callback_data="back_to_menu")
     kb.adjust(1)
     
-    await call.message.edit_text(f"Tanlangan interval: {t} daqiqa.\nJarayonni boshlaymizmi?", reply_markup=kb.as_markup())
+    await call.message.edit_text(f"Interval: {interval} minut. Jarayonni boshlaymizmi?", reply_markup=kb.as_markup())
     await state.set_state(BotStates.confirm_sending)
 
 @dp.callback_query(F.data == "confirm_yes")
-async def start_process(call: types.CallbackQuery, state: FSMContext):
-    await call.message.answer("🚀 Jarayon muvaffaqiyatli boshlandi!")
+async def final_start(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    # Bu yerda yuborish logikasini ishga tushirish kerak (asyncio.create_task yoki Scheduler)
+    await call.message.answer(f"🚀 Jarayon {data['interval']} minutlik interval bilan boshlandi!")
     await show_main_menu(call, state)
 
 @dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu_handler(call: types.CallbackQuery, state: FSMContext):
+async def back_handler(call: types.CallbackQuery, state: FSMContext):
     await show_main_menu(call, state)
 
-# --- BOTNI ISHGA TUSHIRISH ---
+# --- 8. ISHGA TUSHIRISH ---
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Bot ishga tushirildi...")
+    logging.info("Bot is polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot to'xtatildi")
+    asyncio.run(main())
